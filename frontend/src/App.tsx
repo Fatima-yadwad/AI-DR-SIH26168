@@ -10,6 +10,9 @@ import { GpsOutageSimulatorPage } from './components/GpsOutageSimulatorPage';
 import { AiDrCorrectionPage } from './components/AiDrCorrectionPage';
 import { SensorFusionPage } from './components/SensorFusionPage';
 import { DashboardOverview } from './components/DashboardOverview';
+import { AccidentSimulatorPage } from './components/AccidentSimulatorPage';
+import { EmergencyResponseCenter } from './components/EmergencyResponseCenter';
+import { SmartphoneGatewaySimulator } from './components/SmartphoneGatewaySimulator';
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<string>('sih_demo');
@@ -33,6 +36,18 @@ export const App: React.FC = () => {
         }}>
           {activeTab === 'sih_demo' && <SihDemonstrationDashboard />}
           {activeTab === 'overview' && <DashboardOverview onNavigateToTab={setActiveTab} />}
+          {activeTab === 'accident_detection' && (
+            <AccidentSimulatorPage onNavigateToEmergencyCenter={() => setActiveTab('emergency_response')} />
+          )}
+          {activeTab === 'smartphone_gateway' && (
+            <SmartphoneGatewaySimulator
+              onNavigateToEmergencyCenter={() => setActiveTab('emergency_response')}
+              onNavigateToSimulator={() => setActiveTab('accident_detection')}
+            />
+          )}
+          {activeTab === 'emergency_response' && (
+            <EmergencyResponseCenter onNavigateToSimulator={() => setActiveTab('accident_detection')} />
+          )}
           {activeTab === 'gps_monitor' && <GpsIntelligencePage />}
           {activeTab === 'gps_recovery' && <GpsRecoveryPage />}
           {activeTab === 'data' && <DataPreviewPage />}

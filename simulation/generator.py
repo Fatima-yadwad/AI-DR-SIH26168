@@ -361,4 +361,318 @@ class SyntheticSensorDataGenerator:
                 })
             return records
 
+        elif scenario_name == "accident_collision":
+            # 50s total: Cruising at 20 m/s (~72 km/h), high-G crash at t=20.0s, sudden stop and immobility
+            records = []
+            lat = self.start_lat
+            lon = self.start_lon
+            speed = 20.0
+            heading = 15.0
+            for i in range(int(50.0 * self.sample_rate_hz)):
+                t = i * self.dt
+                if t < 20.0:
+                    # Cruising normally
+                    ax = 0.05 + np.random.normal(0, 0.08)
+                    ay = 0.02 + np.random.normal(0, 0.05)
+                    az = 9.81 + np.random.normal(0, 0.06)
+                    gx = 0.001
+                    gy = 0.001
+                    gz = 0.002
+                    dist = speed * self.dt
+                    lat += (dist * math.cos(math.radians(heading))) / 111139.0
+                    lon += (dist * math.sin(math.radians(heading))) / (111139.0 * math.cos(math.radians(lat)))
+                elif 20.0 <= t < 20.3:
+                    # Immediate Crash Impact Shock (severe deceleration, peak impact acceleration)
+                    ax = -62.0 + np.random.normal(0, 3.0)  # ~6.3g deceleration
+                    ay = 24.0 + np.random.normal(0, 2.0)   # ~2.4g lateral deflection
+                    az = 14.5 + np.random.normal(0, 2.0)   # vertical shock
+                    gx = 0.85
+                    gy = 1.20
+                    gz = 3.65                             # severe yaw rotation rate
+                    speed = max(0.0, speed - 65.0 * self.dt)
+                    dist = speed * self.dt
+                    lat += (dist * math.cos(math.radians(heading))) / 111139.0
+                    lon += (dist * math.sin(math.radians(heading))) / (111139.0 * math.cos(math.radians(lat)))
+                elif 20.3 <= t < 21.0:
+                    # Impact settling
+                    ax = -4.0 + np.random.normal(0, 0.5)
+                    ay = 1.5 + np.random.normal(0, 0.3)
+                    az = 9.81 + np.random.normal(0, 0.4)
+                    gx = 0.15
+                    gy = 0.20
+                    gz = 0.45
+                    speed = 0.0
+                else:
+                    # Post-impact complete immobility (vehicle wrecked and stationary)
+                    ax = 0.01 + np.random.normal(0, 0.02)
+                    ay = 0.01 + np.random.normal(0, 0.02)
+                    az = 9.81 + np.random.normal(0, 0.02)
+                    gx = 0.0
+                    gy = 0.0
+                    gz = 0.0
+                    speed = 0.0
+
+                records.append({
+                    "timestamp": round(t, 2),
+                    "latitude": round(lat, 7),
+                    "longitude": round(lon, 7),
+                    "altitude": 216.0,
+                    "accelerometer_x": round(float(ax), 3),
+                    "accelerometer_y": round(float(ay), 3),
+                    "accelerometer_z": round(float(az), 3),
+                    "gyroscope_x": round(float(gx), 4),
+                    "gyroscope_y": round(float(gy), 4),
+                    "gyroscope_z": round(float(gz), 4),
+                    "speed": round(speed, 2),
+                    "heading": round(heading, 1)
+                })
+            return records
+
+        elif scenario_name == "accident_rollover":
+            # High speed turning at 16.5 m/s (~60 km/h) into severe rollover at t=18.0s
+            records = []
+            lat = self.start_lat
+            lon = self.start_lon
+            speed = 16.5
+            heading = 30.0
+            for i in range(int(45.0 * self.sample_rate_hz)):
+                t = i * self.dt
+                if t < 18.0:
+                    turn_rate = 8.0  # steady turn
+                    heading = (heading + turn_rate * self.dt) % 360.0
+                    ax = 0.2
+                    ay = speed * math.radians(turn_rate)
+                    az = 9.81
+                    gx = 0.02
+                    gy = 0.03
+                    gz = math.radians(turn_rate)
+                    dist = speed * self.dt
+                    lat += (dist * math.cos(math.radians(heading))) / 111139.0
+                    lon += (dist * math.sin(math.radians(heading))) / (111139.0 * math.cos(math.radians(lat)))
+                elif 18.0 <= t < 18.4:
+                    # Rollover dynamics: extreme angular velocity, high impact shock
+                    ax = -35.0
+                    ay = 42.0
+                    az = 22.0
+                    gx = 4.2   # 240 deg/s roll rate
+                    gy = 2.5
+                    gz = 3.1
+                    speed = max(0.0, speed - 45.0 * self.dt)
+                    dist = speed * self.dt
+                    lat += (dist * math.cos(math.radians(heading))) / 111139.0
+                    lon += (dist * math.sin(math.radians(heading))) / (111139.0 * math.cos(math.radians(lat)))
+                else:
+                    # Resting on side/roof: zero velocity, tilted gravity vector
+                    ax = 1.2
+                    ay = 7.8
+                    az = 5.9
+                    gx = 0.0
+                    gy = 0.0
+                    gz = 0.0
+                    speed = 0.0
+
+                records.append({
+                    "timestamp": round(t, 2),
+                    "latitude": round(lat, 7),
+                    "longitude": round(lon, 7),
+                    "altitude": 216.0,
+                    "accelerometer_x": round(float(ax), 3),
+                    "accelerometer_y": round(float(ay), 3),
+                    "accelerometer_z": round(float(az), 3),
+                    "gyroscope_x": round(float(gx), 4),
+                    "gyroscope_y": round(float(gy), 4),
+                    "gyroscope_z": round(float(gz), 4),
+                    "speed": round(speed, 2),
+                    "heading": round(heading, 1)
+                })
+            return records
+
+        elif scenario_name in ["sim_hard_braking", "hard_braking"]:
+            # Mode 1: Hard Braking (Controlled emergency stop, no collision, 0 false alarms)
+            records = []
+            lat = self.start_lat
+            lon = self.start_lon
+            speed = 16.7  # 60 km/h
+            heading = 0.0
+            for i in range(int(30.0 * self.sample_rate_hz)):
+                t = i * self.dt
+                if t < 10.0:
+                    ax = 0.02 + np.random.normal(0, 0.03)
+                    ay = 0.01
+                    az = 9.81 + np.random.normal(0, 0.03)
+                    gx, gy, gz = 0.001, 0.001, 0.001
+                elif 10.0 <= t < 13.7:
+                    # Hard controlled braking at -4.5 m/s^2 (no impact shock, no jerk spike)
+                    ax = -4.5 + np.random.normal(0, 0.1)
+                    ay = 0.02
+                    az = 9.81
+                    gx, gy, gz = 0.01, 0.03, 0.002
+                    speed = max(0.0, speed - 4.5 * self.dt)
+                else:
+                    ax = 0.0
+                    ay = 0.0
+                    az = 9.81
+                    gx, gy, gz = 0.0, 0.0, 0.0
+                    speed = 0.0
+
+                dist = speed * self.dt
+                lat += dist / 111139.0
+                records.append({
+                    "timestamp": round(t, 2),
+                    "latitude": round(lat, 7),
+                    "longitude": round(lon, 7),
+                    "altitude": 216.0,
+                    "accelerometer_x": round(float(ax), 3),
+                    "accelerometer_y": round(float(ay), 3),
+                    "accelerometer_z": round(float(az), 3),
+                    "gyroscope_x": round(float(gx), 4),
+                    "gyroscope_y": round(float(gy), 4),
+                    "gyroscope_z": round(float(gz), 4),
+                    "speed": round(speed, 2),
+                    "heading": heading
+                })
+            return records
+
+        elif scenario_name in ["sim_minor_impact", "minor_impact"]:
+            # Mode 2: Minor Impact (Low-speed bumper tap at ~30 km/h, 2.5g impact, LOW severity)
+            records = []
+            lat = self.start_lat
+            lon = self.start_lon
+            speed = 8.3  # 30 km/h
+            heading = 0.0
+            for i in range(int(30.0 * self.sample_rate_hz)):
+                t = i * self.dt
+                if t < 10.0:
+                    ax = 0.02
+                    ay = 0.01
+                    az = 9.81
+                    gx, gy, gz = 0.001, 0.001, 0.001
+                    dist = speed * self.dt
+                    lat += dist / 111139.0
+                elif 10.0 <= t < 10.2:
+                    # Minor bumper impact shock (2.4g)
+                    ax = -22.0 + np.random.normal(0, 1.0)
+                    ay = 8.0
+                    az = 12.0
+                    gx, gy, gz = 0.2, 0.3, 0.5
+                    speed = max(0.0, speed - 25.0 * self.dt)
+                    dist = speed * self.dt
+                    lat += dist / 111139.0
+                else:
+                    # Slow crawl or stop
+                    ax = 0.01
+                    ay = 0.01
+                    az = 9.81
+                    gx, gy, gz = 0.0, 0.0, 0.0
+                    speed = 0.0
+
+                records.append({
+                    "timestamp": round(t, 2),
+                    "latitude": round(lat, 7),
+                    "longitude": round(lon, 7),
+                    "altitude": 216.0,
+                    "accelerometer_x": round(float(ax), 3),
+                    "accelerometer_y": round(float(ay), 3),
+                    "accelerometer_z": round(float(az), 3),
+                    "gyroscope_x": round(float(gx), 4),
+                    "gyroscope_y": round(float(gy), 4),
+                    "gyroscope_z": round(float(gz), 4),
+                    "speed": round(speed, 2),
+                    "heading": heading
+                })
+            return records
+
+        elif scenario_name in ["sim_severe_collision", "severe_collision"]:
+            # Mode 3: Severe Collision (Frontal impact at 72 km/h, 6.5g shock, SEVERE)
+            return self.generate_scenario("accident_collision")
+
+        elif scenario_name in ["sim_rollover", "rollover"]:
+            # Mode 4: Rollover / Abnormal Rotation (High speed turn into roll rate > 240 deg/s)
+            return self.generate_scenario("accident_rollover")
+
+        elif scenario_name in ["sim_severe_accident", "severe_accident"]:
+            # Mode 5: Full 8-Stage Severe Accident Sequence:
+            # 1. Vehicle moving (0..6s at ~45 km/h)
+            # 2. High speed acceleration (6..14s up to ~82 km/h)
+            # 3. Sudden impact (t=14.0s, high G-force > 7.5g)
+            # 4. Acceleration spike & high jerk (da/dt > 500 m/s^3)
+            # 5. Sudden deceleration (82 km/h -> 0 in 0.25s)
+            # 6. Abnormal rotation (yaw/roll spike > 220 deg/s)
+            # 7. Vehicle becomes stationary (complete immobility)
+            # 8. Score increases -> SEVERE ACCIDENT DETECTED
+            records = []
+            lat = self.start_lat
+            lon = self.start_lon
+            speed = 12.5  # 45 km/h
+            heading = 10.0
+            for i in range(int(35.0 * self.sample_rate_hz)):
+                t = i * self.dt
+                if t < 6.0:
+                    # Stage 1: Moving steadily
+                    ax = 0.05 + np.random.normal(0, 0.04)
+                    ay = 0.02
+                    az = 9.81 + np.random.normal(0, 0.04)
+                    gx, gy, gz = 0.002, 0.001, 0.003
+                    dist = speed * self.dt
+                    lat += (dist * math.cos(math.radians(heading))) / 111139.0
+                    lon += (dist * math.sin(math.radians(heading))) / (111139.0 * math.cos(math.radians(lat)))
+                elif 6.0 <= t < 14.0:
+                    # Stage 2: High speed acceleration up to 23.0 m/s (~83 km/h)
+                    ax = 1.35 + np.random.normal(0, 0.06)
+                    ay = 0.05
+                    az = 9.81 + np.random.normal(0, 0.04)
+                    gx, gy, gz = 0.003, 0.002, 0.005
+                    speed = min(23.0, speed + 1.35 * self.dt)
+                    dist = speed * self.dt
+                    lat += (dist * math.cos(math.radians(heading))) / 111139.0
+                    lon += (dist * math.sin(math.radians(heading))) / (111139.0 * math.cos(math.radians(lat)))
+                elif 14.0 <= t < 14.25:
+                    # Stages 3, 4, 5, 6: Catastrophic Crash Impact
+                    # High G-force spike (-7.5g), extreme jerk, sudden deceleration, abnormal spin
+                    ax = -74.0 + np.random.normal(0, 3.0)  # ~7.5g deceleration
+                    ay = 32.0 + np.random.normal(0, 2.0)   # lateral impact
+                    az = 18.0 + np.random.normal(0, 2.0)   # vertical shock
+                    gx = 2.45                              # roll rate (140 deg/s)
+                    gy = 1.65                              # pitch rate (95 deg/s)
+                    gz = 3.90                              # yaw rate (223 deg/s)
+                    speed = max(0.0, speed - 92.0 * self.dt)
+                    dist = speed * self.dt
+                    lat += (dist * math.cos(math.radians(heading))) / 111139.0
+                    lon += (dist * math.sin(math.radians(heading))) / (111139.0 * math.cos(math.radians(lat)))
+                elif 14.25 <= t < 15.0:
+                    # Post-crash recoil
+                    ax = -2.0 + np.random.normal(0, 0.4)
+                    ay = 1.0 + np.random.normal(0, 0.2)
+                    az = 9.81 + np.random.normal(0, 0.3)
+                    gx, gy, gz = 0.05, 0.08, 0.12
+                    speed = 0.0
+                else:
+                    # Stage 7: Vehicle remains stationary (immobility verified)
+                    ax = 0.01 + np.random.normal(0, 0.01)
+                    ay = 0.01 + np.random.normal(0, 0.01)
+                    az = 9.81 + np.random.normal(0, 0.02)
+                    gx, gy, gz = 0.0, 0.0, 0.0
+                    speed = 0.0
+
+                records.append({
+                    "timestamp": round(t, 2),
+                    "latitude": round(lat, 7),
+                    "longitude": round(lon, 7),
+                    "altitude": 216.0,
+                    "accelerometer_x": round(float(ax), 3),
+                    "accelerometer_y": round(float(ay), 3),
+                    "accelerometer_z": round(float(az), 3),
+                    "gyroscope_x": round(float(gx), 4),
+                    "gyroscope_y": round(float(gy), 4),
+                    "gyroscope_z": round(float(gz), 4),
+                    "speed": round(speed, 2),
+                    "heading": round(heading, 1)
+                })
+            return records
+
+        elif scenario_name in ["sim_reset", "reset"]:
+            # Mode 6: Reset to Nominal Cruising
+            gen = SyntheticSensorDataGenerator(duration_sec=35.0, sample_rate_hz=10.0)
+            return gen.generate()
+
         return base_records

@@ -10,7 +10,9 @@ import {
   ShieldAlert,
   Network,
   Radio,
-  RotateCcw
+  RotateCcw,
+  AlertTriangle,
+  Smartphone
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -29,6 +31,9 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
     { id: 'outage', label: 'GPS Outage Simulator', icon: ShieldAlert, badge: 'SIM' },
     { id: 'aidr_correction', label: 'AI/ML Drift Corrector', icon: Cpu, badge: 'AI-DR' },
     { id: 'fusion', label: 'EKF Sensor Fusion', icon: Network, badge: 'EKF' },
+    { id: 'accident_detection', label: 'Accident Detection', icon: AlertTriangle, badge: 'SIM' },
+    { id: 'smartphone_gateway', label: 'Smartphone Gateway', icon: Smartphone, badge: 'BRIDGE' },
+    { id: 'emergency_response', label: 'Emergency Center', icon: ShieldAlert, badge: 'PROTOTYPE' },
   ];
 
   const moduleItems = [
@@ -39,6 +44,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
     { name: 'gps_recovery', status: 'Active (Anti-Teleport)', active: true },
     { name: 'navigation', status: 'Active (ENU/EKF)', active: true },
     { name: 'machine_learning', status: 'Active (RandomForest)', active: true },
+    { name: 'accident_detector', status: 'Active (Multi-Factor)', active: true },
+    { name: 'emergency_system', status: 'Active (SQLite/Dispatch)', active: true },
     { name: 'preprocessing', status: 'Anchor Ready', active: false },
     { name: 'simulation', status: 'Active (Multi-Scenario)', active: true },
     { name: 'evaluation', status: 'Active (Confidence/Metrics)', active: true },

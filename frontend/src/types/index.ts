@@ -403,3 +403,183 @@ export interface SIHDemoResult {
   analytics: SIHAnalyticsSummary;
   frames: SIHFrame[];
 }
+
+// ----------------------------------------------------
+// Autonomous Accident Detection Types
+// ----------------------------------------------------
+
+export type AccidentSeverity = 'NORMAL' | 'LOW' | 'MODERATE' | 'SEVERE';
+
+export interface AccidentEvaluationResult {
+  accident_detected: boolean;
+  severity: AccidentSeverity;
+  accident_score: number;
+  impact_acceleration: number;
+  jerk: number;
+  angular_velocity: number;
+  speed_before: number;
+  speed_after: number;
+  timestamp?: number;
+  factors?: {
+    impact_intensity_score: number;
+    deceleration_score: number;
+    jerk_score: number;
+    rotation_score: number;
+    speed_drop_score: number;
+    immobility_score: number;
+  };
+  metrics?: {
+    accel_magnitude_mps2: number;
+    accel_magnitude_g: number;
+    dynamic_accel_g: number;
+    jerk_mps3: number;
+    angular_velocity_rad_s: number;
+    angular_velocity_deg_s: number;
+    speed_before_kmh: number;
+    speed_after_kmh: number;
+    deceleration_rate_mps2: number;
+    is_post_impact_immobile: boolean;
+    motion_mode: string;
+  };
+  disclaimer: string;
+}
+
+export interface AccidentStreamResult {
+  status: string;
+  total_frames: number;
+  accident_detected: boolean;
+  total_accident_frames: number;
+  peak_incident: AccidentEvaluationResult;
+  severity_distribution: Record<AccidentSeverity, number>;
+  timeline: AccidentEvaluationResult[];
+  disclaimer: string;
+}
+
+export interface AccidentSimulationResult extends AccidentStreamResult {
+  simulation_mode: string;
+  gps_condition?: 'healthy' | 'degraded' | 'lost' | string;
+  detection_status: string;
+  records: TelemetryRecord[];
+  navigation_state?: any;
+  emergency_location?: EmergencyLocation;
+}
+
+// ----------------------------------------------------
+// Emergency Response Countdown & Location Types
+// ----------------------------------------------------
+
+export type EmergencyState = 'IDLE' | 'COUNTDOWN_ACTIVE' | 'CANCELLED' | 'TRIGGERED';
+
+export type PositionSource = 'GPS' | 'SENSOR_FUSION' | 'AI_DR';
+
+export interface EmergencyLocation {
+  latitude: number;
+  longitude: number;
+  altitude?: number;
+  speed: number;
+  heading: number;
+  gps_status: 'HEALTHY' | 'DEGRADED' | 'LOST' | string;
+  position_source: PositionSource;
+  confidence: number;
+  estimated_error_m: number;
+  navigation_reliability: number;
+  timestamp: number | string;
+}
+
+export interface EmergencyResponseStatus {
+  emergency_state: EmergencyState;
+  countdown_remaining: number;
+  user_response: 'CANCELLED' | 'NO_RESPONSE' | null;
+  accident_data?: AccidentEvaluationResult | null;
+  emergency_location?: EmergencyLocation | null;
+  is_sos_dispatched: boolean;
+  is_cancelled: boolean;
+  message: string;
+}
+
+export interface EmergencyEventPayload {
+  event_type?: string;
+  severity: string;
+  accident_score: number;
+  timestamp: number | string;
+  latitude: number;
+  longitude: number;
+  altitude?: number;
+  position_source: PositionSource | string;
+  gps_status?: string;
+  position_confidence?: number;
+  estimated_error_m?: number;
+  speed_before?: number;
+  speed_after?: number;
+  impact_acceleration?: number;
+  jerk?: number;
+  angular_velocity?: number;
+  navigation_reliability?: number;
+  automatic_trigger?: boolean | number;
+  user_response?: string;
+}
+
+export interface EmergencyEventRecord extends EmergencyEventPayload {
+  id: number;
+  event_id: string;
+  status: string;
+  created_at: string;
+}
+
+export interface EmergencyEventResponse {
+  success: boolean;
+  event_id: string;
+  status: string;
+  emergency_state?: EmergencyState;
+  user_response?: string;
+  created_at?: string;
+  message?: string;
+}
+
+// ----------------------------------------------------
+// Smartphone Gateway Simulator Types (Prototype Layer)
+// ----------------------------------------------------
+
+export type GatewayPhoneConnectionStatus = 'CONNECTED' | 'DISCONNECTED' | 'PAIRING';
+export type GatewayNetworkStatus = 'AVAILABLE' | 'CELLULAR_5G' | 'CELLULAR_LTE' | 'OFFLINE';
+export type GatewayTransmissionStatus = 'IDLE' | 'TRANSMITTING' | 'TRANSMITTED' | 'FAILED';
+
+export interface SmartphoneGatewayDeviceState {
+  connected_phone: GatewayPhoneConnectionStatus;
+  device_name: string;
+  connection_type: 'Bluetooth / Wi-Fi' | string;
+  network_status: GatewayNetworkStatus;
+  battery_level: number;
+  signal_strength_dbm: number;
+  companion_app_version: string;
+}
+
+export interface GatewayTransmissionPacket {
+  packet_id: string;
+  event_id: string;
+  timestamp: string;
+  status: GatewayTransmissionStatus;
+  latitude: number;
+  longitude: number;
+  position_source: string;
+  gps_status: string;
+  severity: string;
+  accident_score: number;
+  location_formatted: string;
+  pipeline_steps: Array<{
+    step: number;
+    name: string;
+    description: string;
+    protocol: string;
+    status: 'CONFIRMED' | 'PENDING' | 'RETRY';
+  }>;
+}
+
+export interface SmartphoneGatewayResponse {
+  status: string;
+  device_state: SmartphoneGatewayDeviceState;
+  latest_packet: GatewayTransmissionPacket | null;
+  disclaimer: string;
+}
+
+

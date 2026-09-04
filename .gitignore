@@ -36,3 +36,6 @@ Thumbs.db
 # Testing
 .coverage
 htmlcov/
+
+data/*.db
+data/*.db

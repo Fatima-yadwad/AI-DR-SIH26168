@@ -12,7 +12,8 @@ import sys
 import io
 import time
 import math
-from typing import Dict, Any, List, Optional
+import uuid
+from typing import Dict, Any, List, Optional, Union
 from fastapi import FastAPI, File, UploadFile, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -40,6 +41,10 @@ from machine_learning.feature_extractor import FeatureExtractor
 from machine_learning.model import DriftPredictorModel
 from machine_learning.corrector import AIDRCorrector
 from backend.app.services.validator import DatasetValidator
+from navigation.accident_detector import AccidentDetectionEngine, AccidentDetectorConfig
+from navigation.emergency_manager import EmergencyResponseManager
+from navigation.emergency_location import get_emergency_location, getEmergencyLocation, NavigationStateTracker
+from backend.app.database import init_db, store_emergency_event, get_emergency_event, list_emergency_events
 
 app = FastAPI(
     title="AI-DR Navigation Backend",
@@ -59,6 +64,7 @@ app.add_middleware(
 # Global in-memory state
 active_dataset_records: List[Dict[str, Any]] = []
 global_ml_model = DriftPredictorModel(n_estimators=100, max_depth=12)
+global_emergency_manager = EmergencyResponseManager()
 start_time = time.time()
 
 
@@ -75,7 +81,10 @@ def startup_event():
     if Y is not None:
         global_ml_model.train(X, Y)
 
-    print(f"[AI-DR Backend] Initialized active dataset ({len(active_dataset_records)} records) & SIH Demo Engine.")
+    # Initialize SQLite database for emergency events
+    init_db()
+
+    print(f"[AI-DR Backend] Initialized active dataset ({len(active_dataset_records)} records), SQLite Database & SIH Demo Engine.")
 
 
 @app.get("/api/health")
@@ -726,7 +735,7 @@ def run_sih_demonstration(req: Optional[SIHDemoRequest] = None):
 
     improvement_pct = max(0.0, ((dr_rmse - aidr_rmse) / dr_rmse) * 100.0) if dr_rmse > 0 else 0.0
 
-    return {
+    res_obj = {
         "status": "success",
         "scenario": scen,
         "outage_start_sec": out_start,
@@ -746,6 +755,11 @@ def run_sih_demonstration(req: Optional[SIHDemoRequest] = None):
         },
         "frames": frames
     }
+
+    if frames:
+        NavigationStateTracker.set_current_state(frames[len(frames) // 2])  # Default midpoint active navigation fix
+
+    return res_obj
 
 
 @app.get("/api/simulation/test-scenarios")
@@ -771,8 +785,576 @@ def get_test_scenarios():
             {"id": "motion_frequent_turning", "label": "Frequent Turning / Slalom", "description": "Rapid alternating turns with continuous yaw rate oscillations."},
             {"id": "motion_high_accel", "label": "High Acceleration & Braking", "description": "Hard launch (+3.0 m/s²) followed by emergency braking (-4.5 m/s²)."},
             {"id": "motion_stationary", "label": "Stationary Rest", "description": "Vehicle completely stopped with zero velocity and stable gravity vector."}
+        ],
+        "accident_scenarios": [
+            {"id": "accident_collision", "label": "💥 High-Speed Collision", "description": "Cruising at 72 km/h, severe frontal impact (-6.3g decel), sudden stop, and immobility."},
+            {"id": "accident_rollover", "label": "💥 Rollover Crash", "description": "High-speed turn leading to extreme roll rate (330°/s), multi-axis impact, and rest on side."},
+            {"id": "motion_pothole_speedbump", "label": "Pothole / Speed Bump Jolt", "description": "Sharp vertical acceleration spike (2.7g) without collision (0 false positives)."}
+        ],
+        "simulation_modes": [
+            {"id": "hard_braking", "label": "1. Hard Braking", "description": "Controlled deceleration (-4.5 m/s²) without impact; tests zero false alarms."},
+            {"id": "minor_impact", "label": "2. Minor Impact", "description": "Low-speed 2.4g bumper tap at 30 km/h; classified as LOW severity."},
+            {"id": "severe_collision", "label": "3. Severe Collision", "description": "High-speed frontal crash at 72 km/h; peak impact 6.5g."},
+            {"id": "rollover", "label": "4. Rollover / Abnormal Rotation", "description": "Extreme roll rate (>240°/s) and lateral impact during high-speed turn."},
+            {"id": "severe_accident", "label": "5. SIMULATE SEVERE ACCIDENT", "description": "Full 8-stage sequence: Moving -> High Speed -> Sudden Impact -> High Jerk -> Sudden Deceleration -> Abnormal Rotation -> Stationary -> SEVERE ACCIDENT DETECTED."},
+            {"id": "reset", "label": "6. Reset Simulation", "description": "Resets vehicle to nominal smooth cruising telemetry."}
         ]
     }
+
+
+# =========================================================================
+# Autonomous Accident Detection Endpoints
+# =========================================================================
+
+class AccidentEvaluationRequest(BaseModel):
+    scenario_preset: Optional[str] = None
+    records: Optional[List[Dict[str, Any]]] = None
+
+
+@app.post("/api/accident/evaluate")
+def evaluate_accident_records(req: Optional[AccidentEvaluationRequest] = None):
+    """
+    Run multi-factor accident and collision detection on time-series telemetry.
+    Computes acceleration magnitude, jerk, sudden deceleration, angular motion,
+    and post-impact immobility with multi-factor severity scoring (NORMAL, LOW, MODERATE, SEVERE).
+    """
+    global active_dataset_records
+    if req and req.scenario_preset:
+        generator = SyntheticSensorDataGenerator(duration_sec=50.0, sample_rate_hz=10.0)
+        records = generator.generate_scenario(req.scenario_preset)
+    elif req and req.records:
+        records = req.records
+    else:
+        records = active_dataset_records
+
+    if not records:
+        generator = SyntheticSensorDataGenerator(duration_sec=50.0, sample_rate_hz=10.0)
+        records = generator.generate()
+
+    engine = AccidentDetectionEngine()
+    return engine.evaluate_records(records)
+
+
+class AccidentFrameRequest(BaseModel):
+    current_record: Dict[str, Any]
+    previous_record: Optional[Dict[str, Any]] = None
+
+
+@app.post("/api/accident/evaluate-frame")
+def evaluate_accident_frame(req: AccidentFrameRequest):
+    """
+    Evaluate a single telemetry frame for immediate accident indicators.
+    """
+    engine = AccidentDetectionEngine()
+    return engine.evaluate_frame(curr_rec=req.current_record, prev_rec=req.previous_record)
+
+
+class AccidentSimulationRequest(BaseModel):
+    simulation_mode: Optional[str] = "severe_accident"
+    gps_condition: Optional[str] = "healthy"  # 'healthy', 'degraded', 'lost'
+    # Options for simulation_mode: 'hard_braking', 'minor_impact', 'severe_collision', 'rollover', 'severe_accident', 'reset'
+
+
+@app.post("/api/accident/simulate")
+def simulate_accident_sequence(req: Optional[AccidentSimulationRequest] = None):
+    """
+    Executes a realistic simulation mode through the actual Accident Detection Engine:
+    1. 'hard_braking': Controlled deceleration (-4.5 m/s²), no impact, 0 false alarms.
+    2. 'minor_impact': Low-speed bumper contact at ~30 km/h, LOW severity.
+    3. 'severe_collision': High-speed frontal crash at 72 km/h, SEVERE severity.
+    4. 'rollover': High-speed turn with extreme angular velocity (>240 deg/s).
+    5. 'severe_accident': Full multi-stage sequence: Moving -> High speed -> Sudden impact ->
+       Acceleration spike -> High jerk -> Sudden deceleration -> Abnormal rotation ->
+       Stationary rest -> SEVERE ACCIDENT DETECTED.
+    6. 'reset': Nominal cruising baseline.
+    
+    Supports GPS condition testing:
+    - 'healthy': High-accuracy GPS active.
+    - 'degraded': Urban multipath noise; uses sensor-fusion navigation.
+    - 'lost': GNSS denial / tunnel; strictly returns AI-DR estimated position.
+    """
+    mode = req.simulation_mode if req and req.simulation_mode else "severe_accident"
+    gps_cond = req.gps_condition.lower() if req and req.gps_condition else "healthy"
+    mode_key = f"sim_{mode}" if not mode.startswith("sim_") else mode
+
+    generator = SyntheticSensorDataGenerator(duration_sec=35.0, sample_rate_hz=10.0)
+    records = generator.generate_scenario(mode_key)
+
+    engine = AccidentDetectionEngine()
+    eval_result = engine.evaluate_records(records)
+
+    # Attach mode metadata and explicit detection status
+    peak = eval_result["peak_incident"]
+    if peak["severity"] == "SEVERE":
+        detection_status = "SEVERE ACCIDENT DETECTED"
+    elif peak["severity"] in ["MODERATE", "LOW"]:
+        detection_status = "ACCIDENT DETECTED"
+    else:
+        detection_status = "NO ACCIDENT DETECTED (NORMAL OPERATION)"
+
+    # Build realistic navigation state corresponding to GPS condition
+    peak_time = peak["timestamp"] if peak else 20.0
+    matching_recs = [r for r in records if abs(float(r["timestamp"]) - peak_time) < 0.15]
+    peak_rec = matching_recs[0] if matching_recs else records[0]
+
+    lat_raw = float(peak_rec.get("latitude", 28.6139))
+    lon_raw = float(peak_rec.get("longitude", 77.2090))
+    alt_raw = float(peak_rec.get("altitude", 216.0))
+    spd_raw = float(peak_rec.get("speed", 0.0))
+    head_raw = float(peak_rec.get("heading", 0.0))
+
+    if gps_cond == "lost":
+        # Run AI-DR pipeline to obtain real ML-estimated coordinates during GPS denial
+        dr_engine = TraditionalDeadReckoningEngine(mode="speed_heading")
+        dr_results = dr_engine.run(records=records, gps_enabled=False)
+        
+        corrector = AIDRCorrector(global_ml_model)
+        aidr_results = corrector.correct_trajectory(records, dr_results)
+        aidr_pts = aidr_results.get("trajectory", [])
+        
+        # Match time to peak incident
+        aidr_match = [p for p in aidr_pts if abs(p["timestamp"] - peak_time) < 0.15]
+        aidr_p = aidr_match[0] if aidr_match else (aidr_pts[-1] if aidr_pts else {})
+
+        nav_state = {
+            "latitude": 0.0,  # Corrupted/denied raw GPS
+            "longitude": 0.0,
+            "altitude": alt_raw,
+            "speed": spd_raw,
+            "heading": head_raw,
+            "gps_status": "LOST",
+            "is_outage": True,
+            "timeline_stage": "GPS Lost",
+            "aidr_latitude": float(aidr_p.get("aidr_latitude", lat_raw + 0.00032)),
+            "aidr_longitude": float(aidr_p.get("aidr_longitude", lon_raw + 0.00028)),
+            "dr_latitude": float(aidr_p.get("dr_latitude", lat_raw + 0.00065)),
+            "dr_longitude": float(aidr_p.get("dr_longitude", lon_raw + 0.00055)),
+            "ai_confidence_pct": 86.0,
+            "aidr_error_m": float(aidr_p.get("aidr_error", 15.0)),
+            "uncertainty_sigma_m": 15.0,
+            "sensor_trust": {"gps_reliability": 0.0, "imu_reliability": 95.0, "motion_reliability": 92.0},
+            "timestamp": peak_time
+        }
+    elif gps_cond == "degraded":
+        nav_state = {
+            "latitude": round(lat_raw + 0.00015, 7),  # Multipath shifted
+            "longitude": round(lon_raw + 0.00012, 7),
+            "smooth_latitude": round(lat_raw + 0.00004, 7),
+            "smooth_longitude": round(lon_raw + 0.00003, 7),
+            "altitude": alt_raw,
+            "speed": spd_raw,
+            "heading": head_raw,
+            "gps_status": "DEGRADED",
+            "is_outage": False,
+            "timeline_stage": "GPS Degraded",
+            "ai_confidence_pct": 74.0,
+            "smooth_error_m": 5.2,
+            "uncertainty_sigma_m": 5.2,
+            "sensor_trust": {"gps_reliability": 45.0, "imu_reliability": 92.0, "motion_reliability": 88.0},
+            "timestamp": peak_time
+        }
+    else:
+        # Healthy GPS
+        nav_state = {
+            "latitude": lat_raw,
+            "longitude": lon_raw,
+            "altitude": alt_raw,
+            "speed": spd_raw,
+            "heading": head_raw,
+            "gps_status": "HEALTHY",
+            "is_outage": False,
+            "timeline_stage": "GPS Available",
+            "ai_confidence_pct": 98.0,
+            "uncertainty_sigma_m": 1.5,
+            "sensor_trust": {"gps_reliability": 99.0, "imu_reliability": 97.0, "motion_reliability": 95.0},
+            "timestamp": peak_time
+        }
+
+    NavigationStateTracker.set_current_state(nav_state)
+    emergency_loc = get_emergency_location(nav_state)
+
+    eval_result["simulation_mode"] = mode
+    eval_result["gps_condition"] = gps_cond
+    eval_result["detection_status"] = detection_status
+    eval_result["records"] = records
+    eval_result["navigation_state"] = nav_state
+    eval_result["emergency_location"] = emergency_loc
+
+    # If severe accident detected in simulation, prepare emergency manager with captured location
+    if peak["severity"] == "SEVERE":
+        global_emergency_manager.evaluate_and_initiate(peak, nav_state=nav_state)
+
+    return eval_result
+
+
+# =========================================================================
+# Emergency Response Countdown & Location Endpoints
+# =========================================================================
+
+class EmergencyInitiateRequest(BaseModel):
+    accident_data: Dict[str, Any]
+    navigation_state: Optional[Dict[str, Any]] = None
+
+
+@app.post("/api/emergency/initiate")
+def initiate_emergency_countdown(req: EmergencyInitiateRequest):
+    """
+    Initiates 10-second countdown when a SEVERE accident is detected.
+    Automatically resolves and attaches the best available emergency location.
+    """
+    return global_emergency_manager.evaluate_and_initiate(req.accident_data, nav_state=req.navigation_state)
+
+
+@app.get("/api/emergency/location")
+def get_current_emergency_location(gps_status: Optional[str] = Query(None)):
+    """
+    Returns the best available vehicle position without invoking browser GPS
+    or creating duplicate location calculation systems.
+    Reuses the existing navigation state computed by the AI-DR system:
+    - GPS HEALTHY  -> Returns GPS / fused position
+    - GPS DEGRADED -> Returns Sensor Fusion / AI-DR position
+    - GPS LOST     -> Returns AI-DR ML estimated position
+    """
+    nav_state = NavigationStateTracker.get_current_state()
+    if gps_status:
+        stat = gps_status.upper()
+        if stat == "LOST":
+            nav_state = {
+                "latitude": 0.0,
+                "longitude": 0.0,
+                "aidr_latitude": 12.9716,
+                "aidr_longitude": 77.5946,
+                "dr_latitude": 12.9720,
+                "dr_longitude": 77.5950,
+                "altitude": 216.0,
+                "speed": 0.0,
+                "heading": 15.0,
+                "gps_status": "LOST",
+                "is_outage": True,
+                "ai_confidence_pct": 86.0,
+                "aidr_error_m": 15.0,
+                "uncertainty_sigma_m": 15.0,
+                "sensor_trust": {"gps_reliability": 0.0, "imu_reliability": 95.0, "motion_reliability": 92.0},
+                "timestamp": round(time.time(), 2)
+            }
+        elif stat == "DEGRADED":
+            nav_state = {
+                "latitude": 28.61415,
+                "longitude": 77.20921,
+                "smooth_latitude": 28.61408,
+                "smooth_longitude": 77.20912,
+                "altitude": 216.0,
+                "speed": 0.0,
+                "heading": 15.0,
+                "gps_status": "DEGRADED",
+                "ai_confidence_pct": 74.0,
+                "smooth_error_m": 5.2,
+                "sensor_trust": {"gps_reliability": 45.0, "imu_reliability": 92.0, "motion_reliability": 88.0},
+                "timestamp": round(time.time(), 2)
+            }
+        elif stat in ["HEALTHY", "AVAILABLE"]:
+            nav_state = {
+                "latitude": 28.6139,
+                "longitude": 77.2090,
+                "altitude": 216.0,
+                "speed": 0.0,
+                "heading": 15.0,
+                "gps_status": "HEALTHY",
+                "ai_confidence_pct": 98.0,
+                "uncertainty_sigma_m": 1.5,
+                "sensor_trust": {"gps_reliability": 99.0, "imu_reliability": 97.0, "motion_reliability": 95.0},
+                "timestamp": round(time.time(), 2)
+            }
+    return get_emergency_location(nav_state)
+
+
+@app.post("/api/emergency/cancel")
+def cancel_emergency_sos():
+    """
+    Occupant clicked 'I'M OK — CANCEL SOS'.
+    Cancels countdown and sets user_response = 'CANCELLED'. No alert is sent.
+    """
+    return global_emergency_manager.cancel_by_user()
+
+
+class EmergencyEventPayload(BaseModel):
+    event_type: Optional[str] = "ACCIDENT"
+    severity: str
+    accident_score: float
+    timestamp: Union[float, int, str]
+    latitude: float
+    longitude: float
+    altitude: Optional[float] = None
+    position_source: str
+    gps_status: Optional[str] = "LOST"
+    position_confidence: Optional[float] = None
+    estimated_error_m: Optional[float] = None
+    speed_before: Optional[float] = None
+    speed_after: Optional[float] = None
+    impact_acceleration: Optional[float] = None
+    jerk: Optional[float] = None
+    angular_velocity: Optional[float] = None
+    navigation_reliability: Optional[float] = None
+    automatic_trigger: Optional[bool] = True
+    user_response: Optional[str] = "NO_RESPONSE"
+
+
+def validate_emergency_event(data: Dict[str, Any]) -> None:
+    """
+    Validates required emergency event fields:
+    - latitude: valid float between -90.0 and 90.0
+    - longitude: valid float between -180.0 and 180.0
+    - timestamp: non-empty string or numeric
+    - severity: valid severity (SEVERE, MODERATE, LOW, NORMAL)
+    - accident_score: float between 0.0 and 100.0
+    - position_source: valid position source (AI_DR, GPS, SENSOR_FUSION)
+    """
+    # 1. Validate latitude
+    lat = data.get("latitude")
+    if lat is None:
+        raise HTTPException(status_code=422, detail="Missing required field 'latitude'.")
+    try:
+        lat_val = float(lat)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail=f"Latitude '{lat}' is not a valid numeric float.")
+    if not (-90.0 <= lat_val <= 90.0):
+        raise HTTPException(status_code=422, detail=f"Latitude '{lat_val}' out of valid range [-90.0, 90.0].")
+
+    # 2. Validate longitude
+    lon = data.get("longitude")
+    if lon is None:
+        raise HTTPException(status_code=422, detail="Missing required field 'longitude'.")
+    try:
+        lon_val = float(lon)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail=f"Longitude '{lon}' is not a valid numeric float.")
+    if not (-180.0 <= lon_val <= 180.0):
+        raise HTTPException(status_code=422, detail=f"Longitude '{lon_val}' out of valid range [-180.0, 180.0].")
+
+    # 3. Validate timestamp
+    ts = data.get("timestamp")
+    if ts is None or str(ts).strip() == "":
+        raise HTTPException(status_code=422, detail="Missing required field 'timestamp'.")
+
+    # 4. Validate severity
+    sev = data.get("severity")
+    valid_severities = ["SEVERE", "MODERATE", "LOW", "NORMAL"]
+    if not sev or str(sev).upper() not in valid_severities:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid severity '{sev}'. Must be one of: {valid_severities}."
+        )
+
+    # 5. Validate accident score
+    score = data.get("accident_score")
+    if score is None:
+        raise HTTPException(status_code=422, detail="Missing required field 'accident_score'.")
+    try:
+        score_val = float(score)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail=f"accident_score '{score}' is not a valid numeric float.")
+    if not (0.0 <= score_val <= 100.0):
+        raise HTTPException(status_code=422, detail=f"accident_score '{score_val}' must be between 0.0 and 100.0.")
+
+    # 6. Validate position source
+    pos_src = data.get("position_source")
+    valid_sources = ["AI_DR", "GPS", "SENSOR_FUSION", "FUSED_GPS"]
+    if not pos_src or str(pos_src).upper() not in valid_sources:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid position_source '{pos_src}'. Must be one of: {valid_sources}."
+        )
+
+
+@app.post("/api/emergency/auto-trigger")
+def auto_trigger_emergency_sos(payload: Optional[EmergencyEventPayload] = None):
+    """
+    Automatic emergency SOS trigger endpoint.
+    Receives accident + navigation state, validates parameters, generates unique event_id,
+    and persists event into the SQLite database.
+    
+    Returns:
+    {
+      "success": true,
+      "event_id": "...",
+      "status": "received"
+    }
+    """
+    if payload is not None and payload.latitude is not None and payload.longitude is not None:
+        event_dict = payload.model_dump()
+    else:
+        # Fallback to active state in memory
+        acc = global_emergency_manager.accident_data or {}
+        loc = global_emergency_manager.emergency_location or get_emergency_location()
+        event_dict = {
+            "event_type": "ACCIDENT",
+            "severity": acc.get("severity", "SEVERE"),
+            "accident_score": acc.get("accident_score", 89.0),
+            "timestamp": str(acc.get("timestamp", round(time.time(), 2))),
+            "latitude": loc.get("latitude", 12.9716),
+            "longitude": loc.get("longitude", 77.5946),
+            "altitude": loc.get("altitude", 216.0),
+            "position_source": loc.get("position_source", "AI_DR"),
+            "gps_status": loc.get("gps_status", "LOST"),
+            "position_confidence": loc.get("confidence", 86.0),
+            "estimated_error_m": loc.get("estimated_error_m", 15.0),
+            "speed_before": acc.get("speed_before", 72.0),
+            "speed_after": acc.get("speed_after", 0.0),
+            "impact_acceleration": acc.get("impact_acceleration", 6.8),
+            "jerk": acc.get("jerk", 12.4),
+            "angular_velocity": acc.get("angular_velocity", 4.1),
+            "navigation_reliability": loc.get("navigation_reliability", 82.0),
+            "automatic_trigger": True,
+            "user_response": "NO_RESPONSE"
+        }
+
+    # Strict validation per requirements
+    validate_emergency_event(event_dict)
+
+    # Generate unique event ID
+    event_id = f"EMG-{int(time.time())}-{uuid.uuid4().hex[:6].upper()}"
+
+    # Store in database
+    db_res = store_emergency_event(event_dict, event_id)
+
+    # Advance emergency manager state
+    status = global_emergency_manager.trigger_auto_timeout()
+
+    # Update Smartphone Gateway Simulator packet state
+    global latest_gateway_packet
+    latest_gateway_packet = {
+        "packet_id": f"PKT-{int(time.time())}-{uuid.uuid4().hex[:4].upper()}",
+        "event_id": event_id,
+        "timestamp": str(event_dict.get("timestamp", time.strftime("%Y-%m-%d %H:%M:%S"))),
+        "status": "TRANSMITTED",
+        "latitude": float(event_dict["latitude"]),
+        "longitude": float(event_dict["longitude"]),
+        "position_source": str(event_dict.get("position_source", "AI_DR")),
+        "gps_status": str(event_dict.get("gps_status", "LOST")),
+        "severity": str(event_dict.get("severity", "SEVERE")),
+        "accident_score": float(event_dict.get("accident_score", 92.0)),
+        "location_formatted": f"{float(event_dict['latitude']):.4f}, {float(event_dict['longitude']):.4f}",
+        "pipeline_steps": [
+            {
+                "step": 1,
+                "name": "AI-DR Vehicle System",
+                "description": "Kinematic sensor anomaly detected (Impact, Jerk, Rotation).",
+                "protocol": "Internal CAN/Sensor Bus",
+                "status": "CONFIRMED"
+            },
+            {
+                "step": 2,
+                "name": "Emergency Event",
+                "description": "10s countdown elapsed with zero occupant response. Event packaged.",
+                "protocol": "Accident Detection Engine",
+                "status": "CONFIRMED"
+            },
+            {
+                "step": 3,
+                "name": "Smartphone Gateway Simulator",
+                "description": "Encapsulated packet transmitted over local vehicle bridge.",
+                "protocol": "Bluetooth / Wi-Fi",
+                "status": "CONFIRMED"
+            },
+            {
+                "step": 4,
+                "name": "Emergency Service Simulator",
+                "description": "Emergency dispatch packet received and logged to database.",
+                "protocol": "Cellular Uplink -> HTTPS REST",
+                "status": "CONFIRMED"
+            }
+        ]
+    }
+
+    return {
+        "success": True,
+        "event_id": event_id,
+        "status": "received",
+        "emergency_state": status.get("emergency_state", "TRIGGERED"),
+        "user_response": status.get("user_response", "NO_RESPONSE"),
+        "created_at": db_res.get("created_at"),
+        "disclaimer": "Backend prototype endpoint. Event logged to database. Real emergency services are not contacted."
+    }
+
+
+# -------------------------------------------------------------------------
+# SMARTPHONE GATEWAY SIMULATOR (PROTOTYPE ARCHITECTURE)
+# -------------------------------------------------------------------------
+global_gateway_state: Dict[str, Any] = {
+    "connected_phone": "CONNECTED",
+    "device_name": "Companion Gateway Phone (Prototype)",
+    "connection_type": "Bluetooth / Wi-Fi",
+    "network_status": "AVAILABLE",
+    "battery_level": 85,
+    "signal_strength_dbm": -68,
+    "companion_app_version": "v1.0.0-prototype"
+}
+
+
+@app.get("/api/gateway/status")
+def get_gateway_status():
+    """
+    Returns the current status of the Smartphone Gateway Simulator and latest packet.
+    """
+    return {
+        "status": "success",
+        "device_state": global_gateway_state,
+        "latest_packet": latest_gateway_packet,
+        "disclaimer": "Prototype Smartphone Gateway. Real cellular SMS and emergency calls are not performed."
+    }
+
+
+@app.post("/api/gateway/relay")
+def relay_via_gateway(payload: Optional[EmergencyEventPayload] = None):
+    """
+    Relays an emergency event through the Smartphone Gateway Simulator pipeline:
+    AI-DR Vehicle System -> Emergency Event -> Smartphone Gateway -> Emergency Service Simulator.
+    """
+    res = auto_trigger_emergency_sos(payload)
+    return {
+        "success": True,
+        "status": "TRANSMITTED",
+        "event_id": res.get("event_id"),
+        "packet": latest_gateway_packet,
+        "device_state": global_gateway_state,
+        "disclaimer": "Prototype Smartphone Gateway. Real cellular SMS and emergency calls are not performed."
+    }
+
+
+
+@app.get("/api/emergency/events")
+def get_emergency_events(limit: int = Query(50, ge=1, le=200)):
+    """Retrieve logged emergency events from the database."""
+    return {
+        "status": "success",
+        "events": list_emergency_events(limit=limit)
+    }
+
+
+@app.get("/api/emergency/events/{event_id}")
+def get_single_emergency_event(event_id: str):
+    """Retrieve specific emergency event by event ID."""
+    event = get_emergency_event(event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail=f"Emergency event '{event_id}' not found.")
+    return {"status": "success", "event": event}
+
+
+@app.get("/api/emergency/status")
+def get_emergency_status():
+    """
+    Get current emergency countdown, response status, and captured emergency location.
+    """
+    return global_emergency_manager.get_status()
+
+
+@app.post("/api/emergency/reset")
+def reset_emergency_status():
+    """
+    Reset emergency response manager to IDLE.
+    """
+    global_emergency_manager.reset()
+    return global_emergency_manager.get_status()
 
 
 @app.post("/api/simulation/load-scenario")

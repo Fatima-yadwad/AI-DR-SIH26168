@@ -42,6 +42,11 @@ export const SihDemonstrationDashboard: React.FC = () => {
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
   const [activeChartTab, setActiveChartTab] = useState<number>(0);
 
+  // Emergency Accident Event Map Integration State
+  const [showEmergencyLocation, setShowEmergencyLocation] = useState<boolean>(true);
+  const [emergencyGpsCondition, setEmergencyGpsCondition] = useState<'healthy' | 'degraded' | 'lost'>('lost');
+  const [accidentFrameIndex, setAccidentFrameIndex] = useState<number | null>(null);
+
   const mapCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const chartCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -277,7 +282,163 @@ export const SihDemonstrationDashboard: React.FC = () => {
       ctx.font = '10px var(--font-mono)';
       ctx.fillText(`AI-DR ±${sigmaMeters.toFixed(1)}m`, curX + sigmaPixels + 4, curY - 4);
     }
-  }, [playbackIndex, demoData, currentFrame]);
+
+    // ----------------------------------------------------
+    // 7. EMERGENCY ACCIDENT LOCATION & UNCERTAINTY REGION
+    // ----------------------------------------------------
+    if (showEmergencyLocation && points.length > 0) {
+      // Determine actual accident frame index from trajectory
+      const crashIdx = accidentFrameIndex !== null
+        ? Math.min(accidentFrameIndex, points.length - 1)
+        : (points.findIndex(f => f.is_outage) > 0 ? points.findIndex(f => f.is_outage) + 40 : Math.min(250, points.length - 1));
+
+      const crashFrame = points[crashIdx];
+
+      let emgX: number;
+      let emgY: number;
+      let posSource: string;
+      let gpsStatusLabel: string;
+      let uncertaintyM: number;
+      let latVal: number;
+      let lonVal: number;
+      let confVal: number;
+      let themeColor: string;
+
+      if (emergencyGpsCondition === 'healthy') {
+        emgX = crashFrame.ground_truth_x;
+        emgY = crashFrame.ground_truth_y;
+        posSource = 'GPS';
+        gpsStatusLabel = 'HEALTHY';
+        uncertaintyM = 1.5;
+        confVal = 98.2;
+        latVal = crashFrame.latitude;
+        lonVal = crashFrame.longitude;
+        themeColor = '#10b981';
+      } else if (emergencyGpsCondition === 'degraded') {
+        emgX = crashFrame.smooth_x;
+        emgY = crashFrame.smooth_y;
+        posSource = 'SENSOR_FUSION';
+        gpsStatusLabel = 'DEGRADED';
+        uncertaintyM = 5.2;
+        confVal = 74.5;
+        latVal = crashFrame.smooth_latitude;
+        lonVal = crashFrame.smooth_longitude;
+        themeColor = '#fbbf24';
+      } else {
+        // GPS LOST: Strictly use AI-DR location
+        emgX = crashFrame.aidr_x;
+        emgY = crashFrame.aidr_y;
+        posSource = 'AI_DR';
+        gpsStatusLabel = 'LOST';
+        uncertaintyM = Math.max(12.0, crashFrame.aidr_error_m || 15.0);
+        confVal = crashFrame.ai_confidence_pct || 86.0;
+        latVal = crashFrame.aidr_latitude;
+        lonVal = crashFrame.aidr_longitude;
+        themeColor = '#ef4444';
+      }
+
+      const emgCanvasX = toCanvasX(emgX);
+      const emgCanvasY = toCanvasY(emgY);
+
+      // A. Accident Point On Trajectory (Reference point at crash frame)
+      const trajRefX = toCanvasX(crashFrame.ground_truth_x);
+      const trajRefY = toCanvasY(crashFrame.ground_truth_y);
+
+      // If there is an offset between ground truth trajectory and estimated position, draw dashed link line
+      if (Math.hypot(emgCanvasX - trajRefX, emgCanvasY - trajRefY) > 2) {
+        ctx.strokeStyle = 'rgba(239, 68, 68, 0.4)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(trajRefX, trajRefY);
+        ctx.lineTo(emgCanvasX, emgCanvasY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      // Accident Point on Trajectory Marker
+      ctx.fillStyle = '#ef4444';
+      ctx.beginPath();
+      ctx.arc(trajRefX, trajRefY, 5, 0, 2 * Math.PI);
+      ctx.fill();
+
+      // B. Uncertainty / Estimated Error Region Circle
+      const uncertRadiusPx = Math.max(14, uncertaintyM * scale);
+      ctx.beginPath();
+      ctx.arc(emgCanvasX, emgCanvasY, uncertRadiusPx, 0, 2 * Math.PI);
+      ctx.fillStyle = emergencyGpsCondition === 'lost'
+        ? 'rgba(239, 68, 68, 0.16)'
+        : emergencyGpsCondition === 'degraded'
+          ? 'rgba(245, 158, 11, 0.14)'
+          : 'rgba(16, 185, 129, 0.14)';
+      ctx.fill();
+
+      ctx.strokeStyle = themeColor;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // C. Outer Pulsing Emergency Alert Halo
+      ctx.strokeStyle = 'rgba(239, 68, 68, 0.55)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(emgCanvasX, emgCanvasY, 15, 0, 2 * Math.PI);
+      ctx.stroke();
+
+      // D. Center Emergency Marker (Beacon Diamond)
+      ctx.save();
+      ctx.translate(emgCanvasX, emgCanvasY);
+      ctx.fillStyle = '#ef4444';
+      ctx.beginPath();
+      ctx.moveTo(0, -10);
+      ctx.lineTo(8, 0);
+      ctx.lineTo(0, 10);
+      ctx.lineTo(-8, 0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.restore();
+
+      // E. High-Contrast Emergency HUD Tag Card
+      const labelY = emgCanvasY - uncertRadiusPx - 10;
+      const tagText1 = "🚨 EMERGENCY LOCATION";
+      const tagText2 = `Source: ${posSource === 'AI_DR' ? 'AI-DR' : posSource} (${gpsStatusLabel})`;
+      const tagText3 = `Coords: ${latVal.toFixed(4)}, ${lonVal.toFixed(4)} | Error: ±${uncertaintyM.toFixed(1)}m (${confVal.toFixed(0)}%)`;
+
+      ctx.font = 'bold 10px Inter, sans-serif';
+      const textWidth = Math.max(
+        ctx.measureText(tagText1).width,
+        ctx.measureText(tagText2).width,
+        ctx.measureText(tagText3).width
+      ) + 24;
+
+      const tagX = Math.max(10, Math.min(width - textWidth - 10, emgCanvasX - textWidth / 2));
+      const tagHeight = 44;
+
+      // Background Card
+      ctx.fillStyle = 'rgba(10, 15, 29, 0.94)';
+      ctx.fillRect(tagX, labelY - tagHeight, textWidth, tagHeight);
+      ctx.strokeStyle = themeColor;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(tagX, labelY - tagHeight, textWidth, tagHeight);
+
+      // Text Lines
+      ctx.fillStyle = '#f87171';
+      ctx.font = 'bold 10px Inter, sans-serif';
+      ctx.fillText(tagText1, tagX + 8, labelY - tagHeight + 13);
+
+      ctx.fillStyle = themeColor;
+      ctx.font = '9px var(--font-mono)';
+      ctx.fillText(tagText2, tagX + 8, labelY - tagHeight + 26);
+
+      ctx.fillStyle = '#cbd5e1';
+      ctx.font = '9px var(--font-mono)';
+      ctx.fillText(tagText3, tagX + 8, labelY - tagHeight + 38);
+    }
+  }, [playbackIndex, demoData, currentFrame, showEmergencyLocation, emergencyGpsCondition, accidentFrameIndex]);
 
   // ----------------------------------------------------
   // 2. RENDER INTERACTIVE TIME-SERIES CHARTS (7 Charts Engine)
@@ -669,7 +830,7 @@ export const SihDemonstrationDashboard: React.FC = () => {
             </div>
 
             {/* Legend */}
-            <div style={{ display: 'flex', gap: '10px', fontSize: '0.72rem' }}>
+            <div style={{ display: 'flex', gap: '10px', fontSize: '0.72rem', flexWrap: 'wrap' }}>
               <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#e5e7eb' }}>
                 <span style={{ width: '10px', height: '2px', background: '#ffffff' }} />
                 Reference GPS
@@ -686,6 +847,133 @@ export const SihDemonstrationDashboard: React.FC = () => {
                 <span style={{ width: '10px', height: '2px', background: '#38bdf8' }} />
                 Smooth Recovered
               </span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#f87171', fontWeight: 700 }}>
+                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#ef4444', display: 'inline-block' }} />
+                🚨 Emergency Location ({emergencyGpsCondition === 'lost' ? 'AI-DR' : emergencyGpsCondition === 'degraded' ? 'Sensor Fusion' : 'GPS'})
+              </span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#94a3b8' }}>
+                <span style={{ width: '10px', height: '0px', borderTop: '1px dashed #ef4444' }} />
+                Uncertainty Region
+              </span>
+            </div>
+          </div>
+
+          {/* Interactive Emergency Location Controls on Existing Map */}
+          <div style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: '10px',
+            padding: '10px 14px',
+            borderRadius: '8px',
+            background: 'rgba(239, 68, 68, 0.08)',
+            border: '1px solid rgba(239, 68, 68, 0.3)',
+            marginBottom: '12px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <ShieldAlert size={16} color="#ef4444" />
+              <span style={{ fontSize: '0.78rem', fontWeight: 800, color: '#f87171', letterSpacing: '0.04em' }}>
+                EMERGENCY LOCATION ON MAP:
+              </span>
+              <span style={{ fontSize: '0.72rem', color: '#cbd5e1' }}>
+                (Marker corresponds dynamically to actual navigation state)
+              </span>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              {/* GPS Condition Buttons to Test Healthy / Degraded / Lost */}
+              <div style={{ display: 'flex', gap: '4px' }}>
+                <button
+                  onClick={() => setEmergencyGpsCondition('healthy')}
+                  style={{
+                    padding: '5px 10px',
+                    borderRadius: '4px',
+                    fontSize: '0.72rem',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    background: emergencyGpsCondition === 'healthy' ? 'rgba(16, 185, 129, 0.25)' : 'rgba(255, 255, 255, 0.04)',
+                    border: emergencyGpsCondition === 'healthy' ? '1px solid #10b981' : '1px solid rgba(255, 255, 255, 0.1)',
+                    color: emergencyGpsCondition === 'healthy' ? '#34d399' : '#9ca3af',
+                    transition: 'all 0.15s ease'
+                  }}
+                  title="When GPS is Healthy, marker uses GPS / Ground Truth position"
+                >
+                  🟢 GPS HEALTHY (GPS Source)
+                </button>
+
+                <button
+                  onClick={() => setEmergencyGpsCondition('degraded')}
+                  style={{
+                    padding: '5px 10px',
+                    borderRadius: '4px',
+                    fontSize: '0.72rem',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    background: emergencyGpsCondition === 'degraded' ? 'rgba(245, 158, 11, 0.25)' : 'rgba(255, 255, 255, 0.04)',
+                    border: emergencyGpsCondition === 'degraded' ? '1px solid #f59e0b' : '1px solid rgba(255, 255, 255, 0.1)',
+                    color: emergencyGpsCondition === 'degraded' ? '#fbbf24' : '#9ca3af',
+                    transition: 'all 0.15s ease'
+                  }}
+                  title="When GPS is Degraded, marker uses Sensor Fusion position"
+                >
+                  🟡 GPS DEGRADED (Sensor Fusion)
+                </button>
+
+                <button
+                  onClick={() => setEmergencyGpsCondition('lost')}
+                  style={{
+                    padding: '5px 10px',
+                    borderRadius: '4px',
+                    fontSize: '0.72rem',
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                    background: emergencyGpsCondition === 'lost' ? 'rgba(239, 68, 68, 0.25)' : 'rgba(255, 255, 255, 0.04)',
+                    border: emergencyGpsCondition === 'lost' ? '1px solid #ef4444' : '1px solid rgba(255, 255, 255, 0.1)',
+                    color: emergencyGpsCondition === 'lost' ? '#f87171' : '#9ca3af',
+                    boxShadow: emergencyGpsCondition === 'lost' ? '0 0 10px rgba(239, 68, 68, 0.3)' : 'none',
+                    transition: 'all 0.15s ease'
+                  }}
+                  title="When GPS is Lost, marker strictly uses AI-DR estimated location"
+                >
+                  🔵 GPS LOST (AI-DR Location)
+                </button>
+              </div>
+
+              {/* Set Crash Frame Button */}
+              <button
+                onClick={() => setAccidentFrameIndex(playbackIndex)}
+                style={{
+                  padding: '5px 10px',
+                  borderRadius: '4px',
+                  fontSize: '0.72rem',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  background: 'rgba(255, 255, 255, 0.06)',
+                  border: '1px solid rgba(255, 255, 255, 0.15)',
+                  color: '#e2e8f0'
+                }}
+                title="Place emergency accident at current playback position"
+              >
+                📍 Set Crash at Frame #{playbackIndex}
+              </button>
+
+              {/* Toggle Marker Button */}
+              <button
+                onClick={() => setShowEmergencyLocation(!showEmergencyLocation)}
+                style={{
+                  padding: '5px 10px',
+                  borderRadius: '4px',
+                  fontSize: '0.72rem',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  background: showEmergencyLocation ? 'rgba(239, 68, 68, 0.2)' : 'rgba(255, 255, 255, 0.05)',
+                  border: showEmergencyLocation ? '1px solid #ef4444' : '1px solid rgba(255, 255, 255, 0.1)',
+                  color: showEmergencyLocation ? '#fca5a5' : '#9ca3af'
+                }}
+              >
+                {showEmergencyLocation ? 'Marker: ON' : 'Marker: OFF'}
+              </button>
             </div>
           </div>
 
